@@ -1,0 +1,214 @@
+heat_template_version: 2014-10-16
+
+description: Deploy a ceph master instance
+
+parameters:
+  key_name:
+    type: string
+    description: Name of key-pair to be used for the default user
+  flavor:
+    type: string
+    description: |
+      Choose an instance flavor
+  image_id:
+    type: string
+    label: Server image
+  private_network:
+    type: string
+    description: ID of the network to use
+  name:
+    type: string
+    description: Name of each ceph machine booted
+  osd_servers:
+    type: comma_delimited_list
+    label: OSD Servers
+    description: Comma separated list of OSD servers in the cluster.
+  mon_servers:
+    type: comma_delimited_list
+    label: Mon Servers
+    description: Comma separated list of Monitors servers in the cluster.
+  private_key:
+    type: string
+    description: Name of private key to be used for the local ceph user
+  public_key:
+    type: string
+    description: Name of public key to be used for the local ceph user
+  public_network:
+    type: string
+    description: Public network id
+
+resources:
+  wait_condition:
+    type: OS::Heat::WaitCondition
+    properties:
+      handle: { get_resource: wait_handle }
+      count: 1
+      timeout: 300
+ 
+  wait_handle:
+    type: OS::Heat::WaitConditionHandle
+
+  ceph_admin:
+    type: OS::Nova::Server
+    properties:
+      key_name: { get_param: key_name }
+      name: { get_param: name }
+      image: { get_param: image_id }
+      networks:
+        - port: { get_resource: admin_port }
+      flavor: { get_param: flavor }
+      metadata:
+        osd_servers: { get_param: osd_servers }
+        mon_servers: { get_param: mon_servers }
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          params:
+            wc_notify: { get_attr: ['wait_handle', 'curl_cli'] }
+            __private_key__: { get_param: private_key }
+            __public_key__: { get_param: public_key  }
+          template: |
+            #!/bin/bash
+
+            USERNAME=cephuser
+            # Create local cephuser user
+            useradd -m $USERNAME
+            mkdir -p /home/$USERNAME/.ssh
+            echo "__public_key__" > /home/$USERNAME/.ssh/authorized_keys
+            echo "__private_key__" > /home/$USERNAME/.ssh/id_rsa
+
+            # Put ssh config
+            cat > /home/$USERNAME/.ssh/config <<EOF
+            Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+            EOF
+
+            # Find out associated IP
+            my_ip=$(curl http://169.254.169.254/2009-04-04/meta-data/local-ipv4 2>dev/null)
+        
+            # Add Seeder IP in hosts file
+            cat >> /etc/hosts << EOF
+            ${my_ip} $(hostname)
+            EOF
+
+            # Get OSD IP from openstack metadata
+            list=$(curl http://169.254.169.254/openstack/latest/meta_data.json 2>/dev/null | python -c 'import json,sys;metadata=json.load(sys.stdin);list=json.loads(metadata.get("meta", {}).get("osd_servers", "[]")); print tuple(map(str,list)) ')
+            # Remove useless chars
+            list=${list//[\' ()]}
+            # Convert string to array
+            IFS=',' read -r -a server_list <<< "$list"
+           
+            # Add OSD IP in hosts file
+            for item in "${server_list[@]}"
+            do
+            ip=$(echo ${item} | cut -d "@" -f 1)
+            hostname=$(echo ${item} | cut -d "@" -f 2)
+            cat >> /etc/hosts << EOF
+            ${ip} ${hostname}
+            EOF
+            done
+
+             # Get MON IP from openstack metadata
+            list=$(curl http://169.254.169.254/openstack/latest/meta_data.json 2>/dev/null | python -c 'import json,sys;metadata=json.load(sys.stdin);list=json.loads(metadata.get("meta", {}).get("mon_servers", "[]")); print tuple(map(str,list)) ')
+            # Remove useless chars
+            list=${list//[\' ()]}
+            # Convert string to array
+            IFS=',' read -r -a server_list <<< "$list"
+           
+            # Add Monitors IP in hosts file
+            for item in "${server_list[@]}"
+            do
+            ip=$(echo ${item} | cut -d "@" -f 1)
+            hostname=$(echo ${item} | cut -d "@" -f 2)
+            cat >> /etc/hosts << EOF
+            ${ip} ${hostname}
+            EOF
+            done
+            
+            cat > /etc/sudoers.d/$USERNAME << EOF
+            $USERNAME ALL=(ALL) NOPASSWD: ALL
+            EOF
+            chmod 440 /etc/sudoers.d/$USERNAME
+
+            cat > /etc/yum.repos.d/ceph.repo << EOF
+            [Ceph]
+            name=Ceph packages for \$basearch
+            baseurl=http://download.ceph.com/rpm-jewel/el7/\$basearch
+            enabled=1
+            gpgcheck=1
+            type=rpm-md
+            gpgkey=https://download.ceph.com/keys/release.asc
+            priority=1
+
+            [Ceph-noarch]
+            name=Ceph noarch packages
+            baseurl=http://download.ceph.com/rpm-jewel/el7/noarch
+            enabled=1
+            gpgcheck=1
+            type=rpm-md
+            gpgkey=https://download.ceph.com/keys/release.asc
+            priority=1
+
+            [ceph-source]
+            name=Ceph source packages
+            baseurl=http://download.ceph.com/rpm-jewel/el7/SRPMS
+            enabled=1
+            gpgcheck=1
+            type=rpm-md
+            gpgkey=https://download.ceph.com/keys/release.asc
+            priority=1
+            EOF
+
+            # Fix perms
+            chmod 600 /home/$USERNAME/.ssh/id_rsa
+            chown -R $USERNAME. /home/$USERNAME/.ssh
+            chown -R $USERNAME. /home/$USERNAME
+
+            # Deploy settings
+            for item in "${server_list[@]}"
+            do
+                ip=$(echo ${item} | cut -d "@" -f 1)
+                sudo -H -u $USERNAME scp /etc/hosts ${ip}:/tmp/hosts
+                sudo -H -u $USERNAME ssh ${ip} sudo mv /tmp/hosts /etc/hosts
+            done
+
+            # Notify Heat we're done
+            wc_notify --data-binary '{"status": "SUCCESS"}'
+    
+  ceph_security_group:
+        type: OS::Neutron::SecurityGroup
+        properties:
+          name: ceph_security_group
+          rules:
+            - protocol: icmp
+            - protocol: tcp
+              port_range_min: 22
+              port_range_max: 22
+            - protocol: tcp
+              remote_ip_prefix: 0.0.0.0/0
+              port_range_min: 1024
+              port_range_max: 64511
+
+  admin_port:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_param: private_network }
+      security_groups:
+        - { get_resource: ceph_security_group }
+
+  floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: public_network }
+
+  floating_ip_assoc:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_resource: floating_ip }
+      port_id: { get_resource: admin_port }
+
+outputs:
+  ip:
+    description: The floating IP address of this ceph instance.
+    value: { get_attr: [floating_ip, floating_ip_address] }

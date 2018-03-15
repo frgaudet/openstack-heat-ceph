@@ -1,0 +1,270 @@
+heat_template_version: 2014-10-16
+
+description: Deploy a ceph node instance
+
+parameters:
+  key_name:
+    type: string
+    description: Name of key-pair to be used for the default user
+  flavor:
+    type: string
+    description: Choose an instance flavor
+  image_id:
+    type: string
+    label: Server image
+  private_network:
+    type: string
+    label: Network ID
+    description: name of the private network to use
+  name:
+    type: string
+    description: Name of each ceph machine booted
+  public_network:
+    type: string
+    description: name of the public network to use
+  public_key:
+    type: string
+    description: Name of plublic key to be used for the local ceph user
+  private_key:
+    type: string
+    description: Name of private key to be used for the local ceph user
+
+resources:
+  wait_condition:
+    type: OS::Heat::WaitCondition
+    properties:
+      handle: { get_resource: wait_handle }
+      count: 1
+      timeout: 600
+ 
+  wait_handle:
+    type: OS::Heat::WaitConditionHandle
+
+  osd_server:
+    type: OS::Nova::Server
+    properties:
+      key_name: { get_param: key_name }
+      name: { get_param: name }
+      image: { get_param: image_id }
+      networks:
+        - port: { get_resource: osd_port }
+      flavor: { get_param: flavor }
+      user_data_format: RAW
+      user_data:
+          get_resource: server_init
+
+  server_init:
+    type: OS::Heat::MultipartMime
+    properties:
+      parts:
+      - config: {get_resource: shell_script_init}
+      - config: {get_resource: cloud_init}  
+
+  cloud_init:
+    type: OS::Heat::CloudConfig
+    properties:
+      cloud_config:
+        timezone: Europe/Paris
+        ssh_pwauth: True
+        power_state:
+          mode: reboot
+          message: Rebooting... Please wait...
+          timeout: 5
+
+  shell_script_init:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ungrouped
+      config:
+        str_replace:
+          params:
+            __private_key__: { get_param: private_key }
+            __public_key__: { get_param: public_key  }
+            wc_notify: { get_attr: ['wait_handle', 'curl_cli'] }
+          template: |
+            #!/bin/bash
+
+            USERNAME=cephuser
+            # Create local cephuser user
+            useradd -m $USERNAME
+            mkdir -p /home/$USERNAME/.ssh
+            echo "__public_key__" > /home/$USERNAME/.ssh/authorized_keys
+            echo "__private_key__" > /home/$USERNAME/.ssh/id_rsa
+
+            # Put ssh config
+            cat > /home/$USERNAME/.ssh/config <<EOF
+            Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+            EOF
+            
+            # Fix perms
+            chmod 600 /home/$USERNAME/.ssh/id_rsa
+            chown -R $USERNAME. /home/$USERNAME/.ssh
+            chown -R $USERNAME. /home/$USERNAME
+
+            cat > /etc/sudoers.d/$USERNAME.conf << EOF
+            Defaults:$USERNAME    !requiretty
+            $USERNAME ALL = (root) NOPASSWD:ALL
+            EOF
+            chmod 0440 /etc/sudoers.d/$USERNAME.conf
+
+            cat > /etc/yum.repos.d/ceph.repo << EOF
+            [Ceph]
+            name=Ceph packages for \$basearch
+            baseurl=http://download.ceph.com/rpm-jewel/el7/\$basearch
+            enabled=1
+            gpgcheck=1
+            type=rpm-md
+            gpgkey=https://download.ceph.com/keys/release.asc
+            priority=1
+
+            [Ceph-noarch]
+            name=Ceph noarch packages
+            baseurl=http://download.ceph.com/rpm-jewel/el7/noarch
+            enabled=1
+            gpgcheck=1
+            type=rpm-md
+            gpgkey=https://download.ceph.com/keys/release.asc
+            priority=1
+
+            [ceph-source]
+            name=Ceph source packages
+            baseurl=http://download.ceph.com/rpm-jewel/el7/SRPMS
+            enabled=1
+            gpgcheck=1
+            type=rpm-md
+            gpgkey=https://download.ceph.com/keys/release.asc
+            priority=1
+            EOF
+            
+            cat > /etc/sudoers.d/$USERNAME << EOF
+            $USERNAME ALL=(ALL) NOPASSWD: ALL
+            EOF
+            chmod 440 /etc/sudoers.d/$USERNAME
+            
+            firewall-cmd --zone=public --add-port=6800-7300/tcp --permanent
+            firewall-cmd --reload
+
+            cat /etc/sysctl.d/10-ceph.conf << EOF
+            kernel.pid_max = 4194303
+            vm.zone_reclaim_mode = 0
+            vm.swappiness = 10
+            # vm.min_free_kbytes = 513690 # assuming 64GB of RAM total
+            vm.min_free_kbytes = 1024 
+            vm.dirty_ratio = 40
+            vm.vfs_cache_pressure = 100
+            net.netfilter.nf_conntrack_max = 10000000
+            net.nf_conntrack_max = 10000000
+            EOF
+            sysctl -p
+
+            # Notify Heat we're done
+            wc_notify --data-binary '{"status": "SUCCESS"}'
+
+  osd_port:
+   type: OS::Neutron::Port
+   properties:
+     network: { get_param: private_network }
+     security_groups:
+        - default
+        - All Port Opened
+
+  osd_journal1:
+    type: OS::Cinder::Volume
+    properties:
+      name: Server Cinder storage
+      description: "Journal volume 1"
+      size: 5
+
+  osd_journal2:
+    type: OS::Cinder::Volume
+    properties:
+      name: Server Cinder storage
+      description: "Journal volume 2"
+      size: 5
+
+  osd_journal3:
+    type: OS::Cinder::Volume
+    properties:
+      name: Server Cinder storage
+      description: "Journal volume 3"
+      size: 5
+
+  osd_data1:
+    type: OS::Cinder::Volume
+    properties:
+      name: Server Cinder storage
+      description: "Storage volume 1"
+      size: 10
+
+  osd_data2:
+    type: OS::Cinder::Volume
+    properties:
+      name: Server Cinder storage
+      description: "Storage volume 2"
+      size: 10
+
+  osd_data3:
+    type: OS::Cinder::Volume
+    properties:
+      name: Server Cinder storage
+      description: "Storage volume 3"
+      size: 10
+
+  osd_journal1_att:
+    type: OS::Cinder::VolumeAttachment
+    properties:
+      instance_uuid: { get_resource: osd_server }
+      volume_id: { get_resource: osd_journal1}
+
+  osd_journal2_att:
+    type: OS::Cinder::VolumeAttachment
+    depends_on: osd_journal1_att
+    properties:
+      instance_uuid: { get_resource: osd_server }
+      volume_id: { get_resource: osd_journal2}
+
+  osd_journal3_att:
+    type: OS::Cinder::VolumeAttachment
+    depends_on: osd_journal2_att
+    properties:
+      instance_uuid: { get_resource: osd_server }
+      volume_id: { get_resource: osd_journal3}
+
+  osd_data1_att:
+    type: OS::Cinder::VolumeAttachment
+    depends_on: osd_journal3_att
+    properties:
+      instance_uuid: { get_resource: osd_server }
+      volume_id: { get_resource: osd_data1}
+
+  osd_data2_att:
+    type: OS::Cinder::VolumeAttachment
+    depends_on: osd_data1_att
+    properties:
+      instance_uuid: { get_resource: osd_server }
+      volume_id: { get_resource: osd_data2}
+
+  osd_data3_att:
+    type: OS::Cinder::VolumeAttachment
+    depends_on: osd_data2_att
+    properties:
+      instance_uuid: { get_resource: osd_server }
+      volume_id: { get_resource: osd_data3}
+
+  floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: public_network }
+
+  floating_ip_assoc:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_resource: floating_ip }
+      port_id: { get_resource: osd_port }
+
+outputs:
+  node_param:
+    description: The IP address of this ceph instance.
+    value: { list_join: ['@', [ get_attr: [osd_server, first_address], get_attr: [osd_server, name] ] ]  }

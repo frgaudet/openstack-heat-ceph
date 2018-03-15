@@ -1,0 +1,141 @@
+heat_template_version: 2013-05-23
+
+description: Template that installs a cluster of ceph servers.
+
+parameters:
+  key_name:
+    type: string
+    default: fgaudet-key
+    description: Name of key-pair to be used
+  flavor:
+    type: string
+    default: m1.small
+    constraints:
+    - allowed_values:
+      - m1.small
+      - m1.large
+      - m1.xlarge
+      - m1.xxlarge
+      description: |
+        Choose an instance flavor
+  image_id:
+    type: string
+    default: Centos7
+    label: Server image
+  private_network:
+    type: string
+    default: fgaudet-net2
+    description: name of the private network to use
+  public_network:
+    type: string
+    description: name of the public network to use    
+  private_key:
+    type: string
+    description: Name of private key to be used for the local ceph user
+    default: []
+    hidden: true
+  public_key:
+    type: string
+    description: Name of plublic key to be used for the local ceph user
+    default: []
+    hidden: true
+  osd_count:
+    description: Number of OSD nodes
+    type: number
+    default: 3
+  mon_count:
+    description: Number of monitor nodes
+    type: number
+    default: 3
+  osd_name:
+    type: string
+    default: osd
+    description: Prefix of each OSD instance booted
+  mon_name:
+    type: string
+    default: mon
+    description: Prefix of each MON instance booted
+  admin_name:
+    type: string
+    default: admin
+    description: Prefix of admin instance booted
+
+resources:
+  random_string:
+    type: OS::Heat::RandomString
+
+  my_key:
+    properties:
+      name:
+        str_replace:
+          template:
+            $name-$randomstring-key
+          params:
+            $name: "ceph"
+            $randomstring: { get_attr: [random_string, value] }
+      save_private_key: true
+    type: OS::Nova::KeyPair
+
+  osd_servers:
+    type: OS::Heat::ResourceGroup
+    properties:
+      count: { get_param: osd_count}
+      resource_def:
+        type: ceph_osd.yaml
+        properties:
+          image_id: { get_param: image_id }
+          flavor: { get_param: flavor }
+          key_name: { get_param: key_name }
+          private_network: { get_param: private_network }
+          public_network: { get_param: public_network }
+          public_key: { get_attr: [ my_key, public_key ]  }
+          private_key: { get_attr: [ my_key, private_key ] }
+          name:
+            str_replace:
+              template:
+                $name-$index
+              params:
+                $name: { get_param: osd_name }
+                $index: "%index%"
+
+  mon_servers:
+    type: OS::Heat::ResourceGroup
+    properties:
+      count: { get_param: mon_count}
+      resource_def:
+        type: ceph_mon.yaml
+        properties:
+          image_id: { get_param: image_id }
+          flavor: { get_param: flavor }
+          key_name: { get_param: key_name }
+          private_network: { get_param: private_network }
+          public_network: { get_param: public_network }
+          public_key: { get_attr: [ my_key, public_key ]  }
+          private_key: { get_attr: [ my_key, private_key ] }
+          name:
+            str_replace:
+              template:
+                $name-$index
+              params:
+                $name: { get_param: mon_name }
+                $index: "%index%"
+
+  ceph_admin:
+    type: ceph_admin.yaml
+    depends_on: osd_servers
+    properties:
+      image_id: { get_param: image_id }
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      private_network: { get_param: private_network }
+      public_network: { get_param: public_network }
+      osd_servers: { get_attr: [osd_servers, node_param] }
+      mon_servers: { get_attr: [mon_servers, node_param] }
+      private_key: { get_attr: [ my_key, private_key ] }
+      public_key: { get_attr: [ my_key, public_key ]  }
+      name: { get_param: admin_name }
+
+outputs:
+  ip:
+    description: The floating IP address of the admin node.
+    value: { get_attr: [ceph_admin, ip] }

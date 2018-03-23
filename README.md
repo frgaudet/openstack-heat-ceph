@@ -27,7 +27,7 @@ openstack stack create -t ceph.yaml --parameter "key_name=fgaudet-key;image_id=C
 Of course you can override some default parameters :
 
 ```bash
-openstack stack create -t main.yaml --parameter "key_name=fgaudet-key;image_id=Centos7;private_network=fgaudet-net2;public_network=ext-isimanet;osd_count=5;flavor=m1.medium" Ceph
+openstack stack create -t ceph.yaml --parameter "key_name=fgaudet-key;image_id=Centos7;private_network=fgaudet-net2;public_network=ext-isimanet;osd_count=5;flavor=m1.medium" Ceph
 +---------------------+---------------------------------------------------+
 | Field               | Value                                             |
 +---------------------+---------------------------------------------------+

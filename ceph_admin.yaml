@@ -179,7 +179,7 @@ resources:
   ceph_security_group:
         type: OS::Neutron::SecurityGroup
         properties:
-          name: ceph_security_group
+          name: ceph_admin_security_group
           rules:
             - protocol: icmp
             - protocol: tcp
@@ -195,6 +195,7 @@ resources:
     properties:
       network: { get_param: private_network }
       security_groups:
+        - default        
         - { get_resource: ceph_security_group }
 
   floating_ip:

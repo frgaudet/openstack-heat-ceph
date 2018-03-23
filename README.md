@@ -1,6 +1,6 @@
 # Disclaimer
 
-This template is for educationnal purpose only. It just create a cluster ready to welcome Ceph.
+This template is for educationnal purpose only. It just create a cluster ready to welcome Ceph. The Jewel repo is defined, but you could easily switch to Luminous.
 
 # Introduction
 
